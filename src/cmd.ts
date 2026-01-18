@@ -1,6 +1,7 @@
 import path from "path";
 import ejs from "ejs";
-import { marked, Renderer } from "marked";
+// marked will be dynamically imported
+const dynamicImport = new Function('specifier', 'return import(specifier)');
 import RSS from "rss";
 import send from "send";
 import templates from "./templates";
@@ -148,6 +149,7 @@ async function renderPage(
   context.body = ejs.render(page.contents, context);
 
   if (isMarkdown(page)) {
+    const { marked } = await dynamicImport("marked");
     context.body = await marked.parse(context.body);
   }
 
@@ -161,13 +163,14 @@ async function renderPage(
 }
 
 async function renderPageContentsForRSS(page: PageType, appBaseURL: string) {
+  const { marked, Renderer } = await dynamicImport("marked");
   const renderer = new Renderer();
-  renderer.link = ({ href, title, tokens }) => {
+  renderer.link = ({ href, title, tokens }: any) => {
     const absoluteHref = getLinkHref(href, appBaseURL);
     const text = tokens?.[0]?.raw || '';
     return `<a href="${absoluteHref}">${text}</a>`;
   };
-  renderer.image = ({ href, title, text }) => {
+  renderer.image = ({ href, title, text }: any) => {
     const absoluteHref = getLinkHref(href, appBaseURL);
     return `<img src="${absoluteHref}" alt="${text}">`;
   };
