@@ -1,6 +1,6 @@
 import path from "path";
 import ejs from "ejs";
-import marked from "marked";
+import { marked, Renderer } from "marked";
 import RSS from "rss";
 import send from "send";
 import templates from "./templates";
@@ -133,7 +133,7 @@ interface PageRenderOptions {
   urlPathPrefix: string;
 }
 
-function renderPage(
+async function renderPage(
   page: PageType,
   appContext: ObjectType,
   layouts: LayoutType[],
@@ -148,7 +148,7 @@ function renderPage(
   context.body = ejs.render(page.contents, context);
 
   if (isMarkdown(page)) {
-    context.body = marked(context.body);
+    context.body = await marked.parse(context.body);
   }
 
   const layoutName = page.context.layout || appContext.layout;
@@ -160,18 +160,18 @@ function renderPage(
   return ejs.render(layout.contents, context);
 }
 
-function renderPageContentsForRSS(page: PageType, appBaseURL: string) {
-  const renderer = new marked.Renderer();
-  renderer.link = (href, title, text) => {
-    const absoluteHref = getLinkHref(href as string, appBaseURL);
+async function renderPageContentsForRSS(page: PageType, appBaseURL: string) {
+  const renderer = new Renderer();
+  renderer.link = ({ href, title, tokens }) => {
+    const absoluteHref = getLinkHref(href, appBaseURL);
+    const text = tokens?.[0]?.raw || '';
     return `<a href="${absoluteHref}">${text}</a>`;
   };
-  renderer.image = (href, title, text) => {
-    const absoluteHref = getLinkHref(href as string, appBaseURL);
+  renderer.image = ({ href, title, text }) => {
+    const absoluteHref = getLinkHref(href, appBaseURL);
     return `<img src="${absoluteHref}" alt="${text}">`;
   };
-  marked.setOptions({ renderer });
-  return marked(page.contents);
+  return await marked.parse(page.contents, { renderer });
 }
 
 interface NewCmdArgvType {
@@ -279,7 +279,7 @@ async function cmdServe(argv: ServeCmdArgvType) {
     const urlPath = url.pathname === "/" ? url.pathname : url.pathname.replace(/\/+$/, "");
     const page = syte.pages.find((page) => page.urlPath === urlPath);
     if (page !== undefined) {
-      const body = renderPage(page, syte.app, syte.layouts, syte.pages, { urlPathPrefix: "/" });
+      const body = await renderPage(page, syte.app, syte.layouts, syte.pages, { urlPathPrefix: "/" });
       res.writeHead(200, { "Content-Type": "text/html; charset=UTF-8" });
       res.end(body);
       return;
@@ -333,7 +333,7 @@ async function cmdBuild(argv: BuildCmdArgvType) {
 
   const buildPages = () => {
     return pages.map(async (page) => {
-      const pageContents = renderPage(page, appContext, layouts, pages, argv);
+      const pageContents = await renderPage(page, appContext, layouts, pages, argv);
       const pageOutputDirPath = path.join(outputPath, page.urlPath);
       await fs.mkdirp(pageOutputDirPath);
       const filePath = path.join(pageOutputDirPath, "index.html");
@@ -341,7 +341,7 @@ async function cmdBuild(argv: BuildCmdArgvType) {
     });
   };
 
-  const buildRssFeed = () => {
+  const buildRssFeed = async () => {
     const rssPath = path.join(outputPath, RSS_FILENAME);
     const feed = new RSS({
       title: appContext.title,
@@ -351,23 +351,24 @@ async function cmdBuild(argv: BuildCmdArgvType) {
       pubDate: new Date(),
       ttl: 60,
     });
-    pages
+    const feedPages = pages
       .filter((page) => page.context.date && page.context.title)
-      .sort((a, b) => new Date(b.context.date).getTime() - new Date(a.context.date).getTime())
-      .map((page) => {
-        const contents = renderPageContentsForRSS(page, appContext.base_url);
-        feed.item({
-          title: page.context.title,
-          description: contents,
-          url: `${appContext.base_url}${page.urlPath}`,
-          date: page.context.date,
-        });
+      .sort((a, b) => new Date(b.context.date).getTime() - new Date(a.context.date).getTime());
+    
+    for (const page of feedPages) {
+      const contents = await renderPageContentsForRSS(page, appContext.base_url);
+      feed.item({
+        title: page.context.title,
+        description: contents,
+        url: `${appContext.base_url}${page.urlPath}`,
+        date: page.context.date,
       });
+    }
     return fs.write(rssPath, feed.xml({ indent: true }));
   };
 
 
-  const buildPodcastRssFeed = () => {
+  const buildPodcastRssFeed = async () => {
     const podcastRssPath = path.join(outputPath, PODCAST_RSS_FILENAME);
     const feed = new RSS({
       title: appContext.title,
@@ -411,35 +412,36 @@ async function cmdBuild(argv: BuildCmdArgvType) {
         },
       ],
     });
-    pages
+    const podcastPages = pages
       .filter((page) => page.context.date && page.context.title && page.context.episode_url)
-      .sort((a, b) => new Date(b.context.date).getTime() - new Date(a.context.date).getTime())
-      .map((page) => {
-        const contents = renderPageContentsForRSS(page, appContext.base_url);
-        feed.item({
-          title: page.context.title,
-          description: contents, // displays as "Show Notes"
-          url: `${appContext.base_url}${page.urlPath}`,
-          date: page.context.date,
-          categories: [appContext.podcast_category],
-          enclosure: { url: page.context.episode_url, size: page.context.episode_length },
-          custom_elements: [
-            { "itunes:author": appContext.podcast_author },
-            { "itunes:title": page.context.title },
-            { "itunes:duration": page.context.episode_duration },
-            { "itunes:summary": page.context.episode_summary },
-            { "itunes:subtitle": page.context.episode_summary },
-            { "itunes:explicit": page.context.episode_explict },
-            {
-              "itunes:image": {
-                _attr: {
-                  href: appContext.podcast_img_url,
-                },
+      .sort((a, b) => new Date(b.context.date).getTime() - new Date(a.context.date).getTime());
+    
+    for (const page of podcastPages) {
+      const contents = await renderPageContentsForRSS(page, appContext.base_url);
+      feed.item({
+        title: page.context.title,
+        description: contents, // displays as "Show Notes"
+        url: `${appContext.base_url}${page.urlPath}`,
+        date: page.context.date,
+        categories: [appContext.podcast_category],
+        enclosure: { url: page.context.episode_url, size: page.context.episode_length },
+        custom_elements: [
+          { "itunes:author": appContext.podcast_author },
+          { "itunes:title": page.context.title },
+          { "itunes:duration": page.context.episode_duration },
+          { "itunes:summary": page.context.episode_summary },
+          { "itunes:subtitle": page.context.episode_summary },
+          { "itunes:explicit": page.context.episode_explict },
+          {
+            "itunes:image": {
+              _attr: {
+                href: appContext.podcast_img_url,
               },
             },
-          ],
-        });
+          },
+        ],
       });
+    }
     return fs.write(podcastRssPath, feed.xml({ indent: true }));
   };
 
